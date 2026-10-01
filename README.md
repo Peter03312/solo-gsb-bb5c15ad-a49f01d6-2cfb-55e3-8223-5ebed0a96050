@@ -8,6 +8,8 @@
 
 排练时还可**按演员核对台词**：为稿件登记演员姓名，在修订分支或合并分支上为每个字幕片段指定一名演员；拆分沿用原演员，合并仅在演员相同时沿用、否则清空并提示重新指定，改文案不改归属、重剪重排只动时码。三方合并把演员归属纳入来源区间比较（单侧改动继承该侧，双方在同一区间指定不同演员按冲突逐处选侧，不按保存先后覆盖）。可按当前分支导出**演员走词单**：逐条给出演员、时码、台词与原稿来源序号；有未归属片段或时间线错误时列出具体片段并拒绝整份导出。
 
+为方便海外演员排练，每个分支片段还可录入**双语译文并逐条复核**：译文与原文绑定，原文改动后译文保留作参考但转为待复核，纯时码调整不影响复核状态；拆分两条均保留原译文待复核，合并按原顺序拼接译文待复核，恢复原稿/整支重置清空受影响译文。三方合并把译文与复核状态一并纳入来源区间比较，双方译文或状态不同时按冲突逐处选侧。全部片段译文齐备且已复核、时间线无误后，可导出**双语 SRT**（逐段原文+译文，沿用当前时码与连续编号）；任何空译文、待复核片段或时间线错误都会列出具体片段并拒绝整份导出。
+
 ## 功能
 
 - **导入 SRT**：严格校验序号连续、时间码格式、起点早于终点、片段不重叠；发现错误时列出具体行号与原因并**拒绝整份稿件**（不写入任何数据）。
@@ -46,6 +48,13 @@
   - 仅一侧在某来源区间指定/改动演员（或同时改文案）→ 自动继承该侧；
   - 双方在同一区间都有改动但内容与演员**完全一致** → 自动保留，不报冲突；
   - 双方在同一来源区间指定**不同演员**（或一边有归属一边为空，且文案/结构也有差异）→ 列为**冲突**，冲突卡片显示各自演员，必须逐处手动选 A/B，**不按保存先后覆盖**；未逐处选择不能生成合并分支。
+- **双语译文与复核（本轮新增）**：
+  - 每个分支片段可录入一条译文并**标记已复核**；**空译文不能复核**；译文内容一旦修改即自动回到待复核；
+  - 译文与对应原文绑定：**原文改动后译文保留供参考但转为待复核**；**纯时码调整（含重剪重排）不影响复核状态**；
+  - **拆分**：两条均保留原译文作参考且转为待复核；**与下条合并**：按原顺序拼接两条已有译文（跳过空译文）且转为待复核；**恢复原稿 / 整支重置**：清空受影响译文；
+  - 译文与复核状态的变化**不推进片段 rev**，不影响质检报告与豁免；但会使重剪重排的预览令牌过期（与演员归属一致）；
+  - **三方合并**把译文与复核状态纳入来源区间比较：仅一侧改动自动继承该侧；双方改动完全一致（含译文与状态）自动保留；双方在同一区间都有改动且**译文或复核状态不同**时列为冲突，预览中并列展示各自译文与状态，逐处选侧后**所选内容与状态一并进入合并分支**；
+  - **双语 SRT 导出**：逐段输出原文与译文，沿用当前时码，序号从 1 连续编号；**任何空译文、待复核片段或时间线错误都列出具体片段并拒绝整份导出**（可先调检查接口/点「双语导出检查」查看阻断原因）。现有单语 SRT、质检与演员走词单行为不变。
 
 ## 技术栈
 
@@ -133,7 +142,13 @@ npm start
       - 改文案/时间、重剪重排都不会改变归属。
    3. 页面底部 **演员走词单** 面板实时显示未归属片段清单（若有）以及各演员按出场顺序的台词（时码、台词、原稿来源序号）。
    4. 点工具栏或面板上的 **下载演员走词单**：全部片段已归属且时间线无误才生成 `.txt`；存在未归属片段或时间线错误时逐条列出并拒绝整份导出。
-8. 顶部 **查看原稿 / 下载原稿** 可随时对照与恢复原始稿件。
+8. **双语译文与导出（本轮新增）**：
+   1. 在片段表格 **译文** 列为每个片段录入译文，点 **存译文** 保存；行内徽章显示「未翻译 / 待复核 / 已复核」。
+   2. 核对译文无误后点 **标记已复核**（空译文不能复核，按钮禁用）；如需再改，保存新译文会自动回到待复核，也可随时点 **取消复核**。
+   3. 注意生命周期：改**原文**后译文保留但转为待复核；只改时码（含重剪重排）不影响复核状态；**拆分**两条都带原译文且待复核；**与下条合并**译文按原顺序拼接且待复核；**恢复原稿 / 整条重置**会清空译文。
+   4. 点 **双语导出检查** 查看阻断原因（哪些片段空译文/待复核、是否有时间线错误）；全部解决后点 **导出双语 SRT** 下载逐段「原文+译文」的文件；仍有问题时服务器会逐条列出并拒绝整份导出。
+   5. 合并两条分支时，译文与复核状态随各来源区间一并比较：冲突卡片会显示双方译文与复核状态，逐处选侧后所选内容与状态一并进入合并分支。
+9. 顶部 **查看原稿 / 下载原稿** 可随时对照与恢复原始稿件。
 
 ## SRT 格式要求
 
@@ -158,17 +173,19 @@ npm start
 - `actors`：稿件级演员名单（`UNIQUE(script_id, name)`），删除时片段归属置空；
 - `source_segments`：解析后的原稿片段（合并识别的基准）；
 - `branches`：修订分支与合并结果分支；
-- `branch_segments`：分支上的当前片段（`rev` 为片段修订计数，文案/时码任一变化即 +1，驱动豁免失效；`actor_id` 为演员归属，可空，**归属变化不推进 rev**）；
+- `branch_segments`：分支上的当前片段（`rev` 为片段修订计数，文案/时码任一变化即 +1，驱动豁免失效；`actor_id` 为演员归属，可空，**归属变化不推进 rev**；`translation`/`translation_reviewed` 为译文与复核状态，**译文变化也不推进 rev**）；
 - `segment_sources`：分支片段 ↔ 来源片段多对多关联（拆分=一对多，合并=多对一）；
 - `qc_rules` / `qc_rule_versions`：每稿件当前质检规则指针 + 历史版本归档；
 - `qc_reports` / `qc_hits`：质检报告快照与其命中（规则、片段序号、原稿来源、原因），附生成时的分支状态指纹与时间线问题；
 - `qc_exemptions`：逐条命中豁免，绑定分支、规则版本、片段 id 与 `rev`、命中指纹，片段或规则任一变化即失效。
 
-合并算法以来源序号为轴遍历，依据双方在同一区间的区块（普通/拆分/合并）决定自动保留或提请冲突选择；区块「是否改动」同时比较文案/时码/结构与演员归属，双方区块完全一致（含演员）时自动保留（`both_same`），否则任一差异（含演员不同）都进入冲突，由用户逐处选侧，不以保存先后覆盖。
+合并算法以来源序号为轴遍历，依据双方在同一区间的区块（普通/拆分/合并）决定自动保留或提请冲突选择；区块「是否改动」同时比较文案/时码/结构、演员归属与译文/复核状态，双方区块完全一致（含演员、译文与复核状态）时自动保留（`both_same`），否则任一差异（含演员或译文/状态不同）都进入冲突，由用户逐处选侧，不以保存先后覆盖；所选侧的文案、演员归属、译文与复核状态一并写入合并分支。
 
-重剪重排不新增数据表：预览令牌是「分支片段状态指纹（身份/顺序/时码/文案/来源/演员归属/rev）+ 重排参数」的哈希（无状态）；提交在单事务内批量更新时码，仅换算后时码实际变化的片段 `rev = rev + 1`，因此旧豁免/旧报告只对真正变动的片段失效，未变化片段不被误判；演员归属不随时码变化而改变。
+重剪重排不新增数据表：预览令牌是「分支片段状态指纹（身份/顺序/时码/文案/来源/演员归属/译文/复核状态/rev）+ 重排参数」的哈希（无状态）；提交在单事务内批量更新时码，仅换算后时码实际变化的片段 `rev = rev + 1`，因此旧豁免/旧报告只对真正变动的片段失效，未变化片段不被误判；演员归属与译文复核状态不随时码变化而改变。
 
 演员归属不新增关联表，直接作为 `branch_segments.actor_id` 随片段走：拆分复制、合并不一致则清空、文案编辑与重排均不触碰。走词单在读取时实时按归属与时码分组计算，导出前强制「无未归属片段 + 时间线无错误」闸门。
+
+译文同样随片段走（`branch_segments.translation` / `translation_reviewed`）：原文改动→译文保留转待复核；纯时码调整→状态不变；拆分→两条复制且待复核；合并→按原顺序拼接且待复核；恢复原稿/整支重置→清空。双语导出闸门实时检查「每片段译文非空 + 已复核 + 时间线无错误」，任一不满足即列出片段并拒绝整份导出。
 
 质检判定以当前片段实时计算为准：报告用于可复核留档与豁免操作，质检导出闸门不依赖旧报告，而是重新核验分支、规则、豁免与时间线。
 
@@ -185,20 +202,24 @@ npm start
 | `POST` | `/api/scripts/:id/actors` | 登记演员（body：`name`；空名/重名 400/409） |
 | `PATCH` | `/api/scripts/:id/actors/:aid` | 重命名演员（body：`name`） |
 | `DELETE` | `/api/scripts/:id/actors/:aid` | 删除演员（其归属片段自动变为未归属，返回 `cleared_assignments`） |
-| `GET` | `/api/branches/:id` | 分支及片段（片段含 `actor_id`/`actor_name`） |
+| `GET` | `/api/branches/:id` | 分支及片段（片段含 `actor_id`/`actor_name` 与 `translation`/`translation_reviewed`） |
 | `PATCH` | `/api/branches/:id` | 重命名分支 |
 | `PUT` | `/api/branches/:id/segments/:sid/actor` | 指定/清除片段演员（body：`{"actor_id":N}`，`null` 清除；不改文案/时码，不推进 rev） |
+| `PUT` | `/api/branches/:id/segments/:sid/translation` | 录入/清除片段译文（body：`{"translation":"…"}`，空串清除；内容变化自动转待复核，不推进 rev） |
+| `PUT` | `/api/branches/:id/segments/:sid/translation/review` | 标记/取消译文复核（body：`{"reviewed":true|false}`；空译文复核 400） |
+| `GET` | `/api/branches/:id/bilingual/validate` | 双语导出检查（空译文/待复核/时间线问题逐条列出） |
+| `GET` | `/api/branches/:id/export-bilingual` | 导出双语 SRT（逐段原文+译文；任何空译文/待复核/时间线错误 409 并逐条列出，拒绝整份导出） |
 | `GET` | `/api/branches/:id/cue-sheet` | 走词单 JSON（未归属片段、时间线问题、各演员台词顺序与原稿来源序号） |
 | `GET` | `/api/branches/:id/cue-sheet/export` | 下载演员走词单 `.txt`（有未归属片段/时间线错误时 409，逐条列出并拒绝导出） |
-| `PATCH` | `/api/branches/:id/segments/:sid` | 改文案/起止时间 |
-| `POST` | `/api/branches/:id/segments/:sid/split` | 拆分（`cut_ms`） |
-| `POST` | `/api/branches/:id/segments/:sid/merge-with-next` | 与下条合并 |
-| `POST` | `/api/branches/:id/segments/:sid/reset` | 单条恢复原稿 |
-| `POST` | `/api/branches/:id/reset-all` | 整条重置 |
+| `PATCH` | `/api/branches/:id/segments/:sid` | 改文案/起止时间（原文改动→译文保留转待复核；纯时码调整不影响复核状态） |
+| `POST` | `/api/branches/:id/segments/:sid/split` | 拆分（`cut_ms`；两条均保留原译文且待复核） |
+| `POST` | `/api/branches/:id/segments/:sid/merge-with-next` | 与下条合并（译文按原顺序拼接且待复核） |
+| `POST` | `/api/branches/:id/segments/:sid/reset` | 单条恢复原稿（清空该条译文） |
+| `POST` | `/api/branches/:id/reset-all` | 整条重置（清空全分支译文） |
 | `POST` | `/api/branches/:id/recut/preview` | 重剪重排预览（返回受影响片段新旧时码、问题清单与一次性令牌 `token`） |
-| `POST` | `/api/branches/:id/recut/apply` | 凭令牌确认重排（整体成功或不改动；令牌过期 409，校验问题 400） |
-| `POST` | `/api/merge/preview` | 合并预览（冲突清单） |
-| `POST` | `/api/merge/apply` | 提交冲突选择并生成合并分支 |
+| `POST` | `/api/branches/:id/recut/apply` | 凭令牌确认重排（整体成功或不改动；令牌过期 409，校验问题 400；不影响译文复核状态） |
+| `POST` | `/api/merge/preview` | 合并预览（冲突清单；片段含译文与复核状态） |
+| `POST` | `/api/merge/apply` | 提交冲突选择并生成合并分支（所选侧译文与复核状态一并写入） |
 | `GET` | `/api/branches/:id/validate` | 导出前时间线检查 |
 | `GET` | `/api/branches/:id/export` | 导出连续编号 SRT（原有，时间线校验） |
 | `GET` | `/api/scripts/:id/qc-rules` | 读取当前质检规则（未配置返回 `configured:false`） |
@@ -288,6 +309,52 @@ curl -s -i http://localhost:3000/api/branches/1/cue-sheet/export
 单侧改动的条目（`a_only`/`b_only`）与双方一致条目（`both_same`）自动处理，双方在同一来源区间指定不同演员的条目为 `conflict`，
 `/api/merge/apply` 仍要求在 `resolutions` 中对每个冲突逐处选 `"A"`/`"B"`，否则返回 400 `unresolved`。所选侧的演员归属随片段写入合并分支。
 
+### 双语译文接口与调用示例
+
+片段对象新增字段：`translation`（译文，`null`=未录入）、`translation_reviewed`（0 待复核 / 1 已复核）。
+
+```bash
+# 1) 录入译文（传空字符串清除；译文内容变化会自动回到待复核）
+curl -s -X PUT http://localhost:3000/api/branches/1/segments/10/translation \
+  -H 'Content-Type: application/json' -d '{"translation":"Act One opens, everyone in position"}'
+# => {"ok":true,"changed":true,"translation":"Act One opens, everyone in position","translation_reviewed":0}
+
+# 2) 标记已复核 / 取消复核（空译文复核返回 400）
+curl -s -X PUT http://localhost:3000/api/branches/1/segments/10/translation/review \
+  -H 'Content-Type: application/json' -d '{"reviewed":true}'
+# => {"ok":true,"changed":true,"translation_reviewed":1}
+
+# 3) 生命周期速查：
+#    PATCH 改原文     => 译文保留，translation_reviewed 变 0（响应带 translation_stale:true）
+#    PATCH 只改时码   => 复核状态不变（重剪重排同理）
+#    split            => 两条都带原译文且待复核（响应带 translation_carried:true）
+#    merge-with-next  => 译文按原顺序拼接且待复核（响应带 translation_carried/translation_pending）
+#    reset / reset-all=> 清空受影响译文（响应带 translation_cleared / translations_cleared）
+
+# 4) 双语导出检查：逐条列出空译文、待复核片段与时间线问题
+curl -s http://localhost:3000/api/branches/1/bilingual/validate
+# => {"ok":false,"segment_count":4,"translated":3,"reviewed":2,
+#     "bilingual_issues":[{"ord":2,"timecode":"00:00:03,600 --> 00:00:06,200",
+#                          "issue":"missing_translation","message":"片段 #2 缺少译文…"},
+#                         {"ord":3,"issue":"pending_review","message":"片段 #3 译文尚未复核…",...}],
+#     "timeline_issues":[]}
+
+# 5) 导出双语 SRT：任何空译文/待复核/时间线错误都拒绝整份导出（409 并逐条列出）
+curl -s -i http://localhost:3000/api/branches/1/export-bilingual
+# HTTP/1.1 409 Conflict
+# {"error":"双语字幕导出被拒绝（空译文/待复核 2 条，时间线问题 0 处）…",
+#  "bilingual_issues":[...],"timeline_issues":[]}
+# 全部片段译文齐备且已复核、时间线无误后 => HTTP 200，逐段输出原文与译文：
+#   1
+#   00:00:01,000 --> 00:00:03,500
+#   第一幕开场，全体就位
+#   Act One opens, everyone in position
+```
+
+三方合并同样比较译文与复核状态：`/api/merge/preview` 的片段带 `translation`/`translation_reviewed`，
+双方在同一来源区间的译文或复核状态不同即为 `conflict`（完全一致则 `both_same` 自动保留），
+`/api/merge/apply` 逐处选侧后，所选侧的译文与复核状态一并写入合并分支。
+
 ## 目录结构
 
 ```
@@ -298,11 +365,12 @@ curl -s -i http://localhost:3000/api/branches/1/cue-sheet/export
 ├── examples/
 │   └── sample.srt    # 可直接导入试用的示例稿件
 ├── server/
-│   ├── index.js      # Express 路由与业务接口（含质检接口）
+│   ├── index.js      # Express 路由与业务接口（含质检、译文接口）
 │   ├── db.js         # SQLite 连接与建表初始化（含质检表与旧库迁移）
 │   ├── srt.js        # SRT 解析 / 校验 / 序列化
-│   ├── merge.js      # 按来源片段的三方合并（纳入演员归属比较与继承）
+│   ├── merge.js      # 按来源片段的三方合并（纳入演员归属、译文与复核状态比较与继承）
 │   ├── actors.js     # 演员登记、片段归属策略与演员走词单（校验闸门/文本导出）
+│   ├── translation.js # 双语译文：录入/复核、生命周期策略、双语 SRT 导出闸门
 │   ├── recut.js      # 重剪重排：区间等比重排 + 区间后平移、预览令牌与原子提交
 │   └── qc.js         # 质检规则校验、命中评估、报告/豁免与导出闸门
 └── public/

@@ -59,7 +59,9 @@ CREATE TABLE IF NOT EXISTS branch_segments (
   end_ms     INTEGER NOT NULL,
   text       TEXT NOT NULL,
   actor_id   INTEGER REFERENCES actors(id) ON DELETE SET NULL, -- 演员归属（可空=未归属）
-  rev        INTEGER NOT NULL DEFAULT 1 -- 片段修订计数：文案/时码任一变化即 +1，用于豁免失效（归属变化不推进 rev）
+  rev        INTEGER NOT NULL DEFAULT 1, -- 片段修订计数：文案/时码任一变化即 +1，用于豁免失效（归属变化不推进 rev）
+  translation TEXT,                     -- 译文（NULL=未录入；供海外演员的双语字幕）
+  translation_reviewed INTEGER NOT NULL DEFAULT 0 -- 译文复核状态：0 待复核 / 1 已复核（空译文不可复核）
 );
 
 -- 来源关联：
@@ -155,6 +157,13 @@ if (!segCols.some((c) => c.name === 'rev')) {
 // 旧库迁移：演员归属列（旧行默认 NULL=未归属）
 if (!segCols.some((c) => c.name === 'actor_id')) {
   db.exec('ALTER TABLE branch_segments ADD COLUMN actor_id INTEGER');
+}
+// 旧库迁移：双语译文列（旧行默认 NULL=未录入译文、待复核）
+if (!segCols.some((c) => c.name === 'translation')) {
+  db.exec('ALTER TABLE branch_segments ADD COLUMN translation TEXT');
+}
+if (!segCols.some((c) => c.name === 'translation_reviewed')) {
+  db.exec('ALTER TABLE branch_segments ADD COLUMN translation_reviewed INTEGER NOT NULL DEFAULT 0');
 }
 
 // 以下索引依赖 actor_id，须在迁移补列之后创建

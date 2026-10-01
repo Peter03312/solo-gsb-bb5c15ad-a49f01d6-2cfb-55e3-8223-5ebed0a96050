@@ -153,15 +153,17 @@ function renderEditor() {
       <button id="btnRename">重命名</button>
       <span class="spacer"></span>
       <button id="btnValidate">导出前检查</button>
+      <button id="btnBiCheck">双语导出检查</button>
       <button id="btnRecut">重剪重排</button>
       <button id="btnResetAll">整条重置为原稿</button>
       <a class="btn" id="btnCueExport" href="/api/branches/${b.id}/cue-sheet/export" download>下载演员走词单</a>
       <a class="btn" id="btnExport" href="/api/branches/${b.id}/export" download>导出 SRT</a>
+      <a class="btn" id="btnBiExport" href="/api/branches/${b.id}/export-bilingual" download>导出双语 SRT</a>
     </div>
     <div id="validateResult"></div>
     <table class="seg-table">
       <thead><tr>
-        <th class="col-ord">#</th><th class="col-src">来源片段</th><th class="col-actor">演员</th><th>文案</th><th class="col-time">起止时间</th><th class="col-ops">操作</th>
+        <th class="col-ord">#</th><th class="col-src">来源片段</th><th class="col-actor">演员</th><th>文案</th><th class="col-tr">译文（供海外演员）</th><th class="col-time">起止时间</th><th class="col-ops">操作</th>
       </tr></thead>
       <tbody>`;
 
@@ -176,6 +178,14 @@ function renderEditor() {
       .concat(state.actors.map((a) =>
         `<option value="${a.id}" ${a.id === seg.actor_id ? 'selected' : ''}>${esc(a.name)}</option>`))
       .join('');
+    const trText = seg.translation || '';
+    const hasTr = trText.trim() !== '';
+    const reviewed = !!seg.translation_reviewed;
+    const trBadge = !hasTr
+      ? '<span class="tr-badge tr-none">未翻译</span>'
+      : reviewed
+        ? '<span class="tr-badge tr-reviewed">已复核</span>'
+        : '<span class="tr-badge tr-pending">待复核</span>';
     html += `
       <tr data-id="${seg.id}" class="${unassigned ? 'row-unassigned' : ''}">
         <td class="col-ord">${seg.ord}</td>
@@ -185,6 +195,14 @@ function renderEditor() {
           ${unassigned ? '<div class="actor-warn">未归属</div>' : ''}
         </td>
         <td><textarea rows="2" data-field="text">${esc(seg.text)}</textarea></td>
+        <td class="col-tr">
+          <textarea rows="2" data-field="translation" placeholder="录入译文…">${esc(trText)}</textarea>
+          <div class="tr-row">
+            ${trBadge}
+            <button data-act="save-tr" title="保存译文；内容变化将转为待复核">存译文</button>
+            <button data-act="review" ${hasTr ? '' : 'disabled'} title="${reviewed ? '取消复核标记' : '确认译文无误，标记已复核'}">${reviewed ? '取消复核' : '标记已复核'}</button>
+          </div>
+        </td>
         <td class="col-time">
           <div class="time-row">
             <input type="text" data-field="start_ms" value="${msToTc(seg.start_ms)}">
@@ -205,6 +223,7 @@ function renderEditor() {
 
   $('#btnRename').onclick = renameBranch;
   $('#btnValidate').onclick = runValidate;
+  $('#btnBiCheck').onclick = runBilingualCheck;
   $('#btnRecut').onclick = openRecutDialog;
   $('#btnResetAll').onclick = resetAll;
   $('#btnCueExport').onclick = (e) => { e.preventDefault(); cueExport(); };
@@ -213,6 +232,10 @@ function renderEditor() {
     e.preventDefault();
     exportSrt();
   };
+  $('#btnBiExport').onclick = (e) => {
+    e.preventDefault();
+    exportBilingual();
+  };
 
   $$('#editor tbody tr').forEach((tr) => {
     const id = Number(tr.dataset.id);
@@ -220,6 +243,8 @@ function renderEditor() {
     tr.querySelector('[data-act=split]').onclick = () => splitSegment(id);
     tr.querySelector('[data-act=merge]').onclick = () => mergeWithNext(id);
     tr.querySelector('[data-act=reset]').onclick = () => resetSegment(id);
+    tr.querySelector('[data-act=save-tr]').onclick = () => saveTranslation(tr, id);
+    tr.querySelector('[data-act=review]').onclick = () => toggleReview(id);
     tr.querySelector('[data-field=actor]').onchange = (ev) => assignActor(id, ev.target.value === '' ? null : Number(ev.target.value), ev.target);
   });
 }
@@ -244,10 +269,12 @@ async function saveSegment(tr, id) {
   if (start < 0 || end < 0) return toast('时间不能为负', 'error');
   if (start >= end) return toast('起点必须早于终点', 'error');
   try {
-    await api(`/api/branches/${state.branchId}/segments/${id}`, {
+    const r = await api(`/api/branches/${state.branchId}/segments/${id}`, {
       method: 'PATCH', body: { start_ms: start, end_ms: end, text }
     });
-    toast('片段已保存', 'ok');
+    toast(r.translation_stale
+      ? '片段已保存；原文已改动，译文保留为参考并转为待复核'
+      : '片段已保存', 'ok');
     await selectBranch(state.branchId);
   } catch (e) { toast(e.message, 'error'); }
 }
@@ -262,21 +289,25 @@ async function splitSegment(id) {
   const cut = tcToMs(input);
   if (Number.isNaN(cut)) return toast('时间码格式应为 HH:MM:SS,mmm', 'error');
   try {
-    await api(`/api/branches/${state.branchId}/segments/${id}/split`, {
+    const r = await api(`/api/branches/${state.branchId}/segments/${id}/split`, {
       method: 'POST', body: { cut_ms: cut }
     });
-    toast('已拆分', 'ok');
+    toast(r.translation_carried
+      ? '已拆分：两条均保留原译文作参考并转为待复核'
+      : '已拆分', 'ok');
     await selectBranch(state.branchId);
   } catch (e) { toast(e.message, 'error'); }
 }
 
 async function mergeWithNext(id) {
-  if (!confirm('确定与下一片段合并？时间取外边界，文案用空格连接（之后可再编辑）。演员仅在两条相同时沿用，否则会清空并需重新指定。')) return;
+  if (!confirm('确定与下一片段合并？时间取外边界，文案用空格连接（之后可再编辑）。演员仅在两条相同时沿用，否则会清空并需重新指定；已有译文按原顺序拼接并转为待复核。')) return;
   try {
     const r = await api(`/api/branches/${state.branchId}/segments/${id}/merge-with-next`, {
       method: 'POST', body: {}
     });
-    toast(r.notice || '已合并', r.notice ? 'error' : 'ok');
+    let msg = r.notice || '已合并';
+    if (r.translation_carried) msg += '；译文已按原顺序拼接并转为待复核';
+    toast(msg, r.notice ? 'error' : 'ok');
     await selectBranch(state.branchId);
   } catch (e) { toast(e.message, 'error'); }
 }
@@ -310,20 +341,48 @@ async function assignActor(id, actorId, selectEl) {
 }
 
 async function resetSegment(id) {
-  if (!confirm('将该片段恢复为原稿内容与时间？')) return;
+  if (!confirm('将该片段恢复为原稿内容与时间？该片段的译文将被清空。')) return;
   try {
-    await api(`/api/branches/${state.branchId}/segments/${id}/reset`, { method: 'POST' });
-    toast('已恢复原稿', 'ok');
+    const r = await api(`/api/branches/${state.branchId}/segments/${id}/reset`, { method: 'POST' });
+    toast(r.translation_cleared ? '已恢复原稿，译文已清空' : '已恢复原稿', 'ok');
     await selectBranch(state.branchId);
   } catch (e) { toast(e.message, 'error'); }
 }
 
 async function resetAll() {
   if (state.branch.kind === 'merged') return toast('合并结果分支不可整体重置', 'error');
-  if (!confirm('整条分支重置回原稿？当前分支的全部修改将丢失。')) return;
-  await api(`/api/branches/${state.branchId}/reset-all`, { method: 'POST' });
-  toast('已重置为原稿', 'ok');
+  if (!confirm('整条分支重置回原稿？当前分支的全部修改与全部译文将丢失。')) return;
+  const r = await api(`/api/branches/${state.branchId}/reset-all`, { method: 'POST' });
+  toast(r.translations_cleared ? `已重置为原稿，清空 ${r.translations_cleared} 条译文` : '已重置为原稿', 'ok');
   await selectBranch(state.branchId);
+}
+
+// ---------------- 译文（双语字幕） ----------------
+
+async function saveTranslation(rowEl, id) {
+  const translation = rowEl.querySelector('[data-field=translation]').value;
+  try {
+    const r = await api(`/api/branches/${state.branchId}/segments/${id}/translation`, {
+      method: 'PUT', body: { translation }
+    });
+    if (!r.changed) toast('译文未变化', 'ok');
+    else if (r.translation == null) toast('译文已清空', 'ok');
+    else toast('译文已保存（待复核，确认无误后请点「标记已复核」）', 'ok');
+    await selectBranch(state.branchId);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function toggleReview(id) {
+  const seg = state.branch.segments.find((s) => s.id === id);
+  if (!seg) return;
+  const reviewed = !seg.translation_reviewed;
+  try {
+    await api(`/api/branches/${state.branchId}/segments/${id}/translation/review`, {
+      method: 'PUT', body: { reviewed }
+    });
+    toast(reviewed ? '已标记为已复核' : '已转为待复核', 'ok');
+    await selectBranch(state.branchId);
+  } catch (e) { toast(e.message, 'error'); }
 }
 
 // ---------------- 导出检查 ----------------
@@ -358,6 +417,53 @@ async function exportSrt() {
     a.click();
     URL.revokeObjectURL(a.href);
     toast('已导出 SRT', 'ok');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+// ---------------- 双语导出 ----------------
+
+function renderBilingualResult(box, data) {
+  const bi = data.bilingual_issues || [];
+  const tl = data.timeline_issues || [];
+  if (!bi.length && !tl.length) {
+    box.innerHTML = `<div class="validate-ok">✓ 双语导出检查通过：${data.segment_count ?? ''} 条片段均有已复核译文，时间线无误，可导出双语 SRT。</div>`;
+    return;
+  }
+  const items = [
+    ...bi.map((i) => `<li>片段 #${i.ord}（${i.timecode}）：${i.issue === 'missing_translation' ? '空译文，请录入译文' : '译文待复核，请复核后标记'}</li>`),
+    ...tl.map((i) => `<li>${i.ord ? `时间线 片段 #${i.ord}：` : '时间线：'}${esc(i.message)}</li>`)
+  ];
+  box.innerHTML = `<div class="validate-bad">✗ 双语导出被阻止（空译文/待复核 ${bi.length} 条，时间线问题 ${tl.length} 处），整份导出已被拒绝：</div>
+    <ul class="issue-list">${items.join('')}</ul>`;
+}
+
+async function runBilingualCheck() {
+  try {
+    const result = await api(`/api/branches/${state.branchId}/bilingual/validate`);
+    renderBilingualResult($('#validateResult'), result);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function exportBilingual() {
+  try {
+    const resp = await fetch(`/api/branches/${state.branchId}/export-bilingual`);
+    if (!resp.ok) {
+      const data = await resp.json();
+      renderBilingualResult($('#validateResult'), data);
+      return toast(`双语导出被阻止：${data.error}`, 'error');
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = /filename\*=UTF-8''(.+)$/.exec(cd);
+    const fname = m ? decodeURIComponent(m[1]) : 'bilingual.srt';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('已导出双语 SRT', 'ok');
   } catch (e) {
     toast(e.message, 'error');
   }
@@ -456,9 +562,19 @@ function renderSegMini(seg) {
   const actor = seg.actor_name
     ? `<span class="cue-actor-tag">🎭 ${esc(seg.actor_name)}</span>`
     : '<span class="cue-actor-tag none">未归属</span>';
+  const hasTr = !!(seg.translation && String(seg.translation).trim());
+  const trBadge = !hasTr
+    ? '<span class="tr-badge tr-none">无译文</span>'
+    : seg.translation_reviewed
+      ? '<span class="tr-badge tr-reviewed">译文已复核</span>'
+      : '<span class="tr-badge tr-pending">译文待复核</span>';
+  const trLine = hasTr
+    ? `<div class="cc-tr">译：${esc(seg.translation).replace(/\n/g, '<br>')}</div>`
+    : '';
   return `<div class="cc-seg">
-    <div class="t">${msToTc(seg.start_ms)} → ${msToTc(seg.end_ms)} ${actor}</div>
+    <div class="t">${msToTc(seg.start_ms)} → ${msToTc(seg.end_ms)} ${actor} ${trBadge}</div>
     <div>${esc(seg.text).replace(/\n/g, '<br>')}</div>
+    ${trLine}
   </div>`;
 }
 
@@ -497,7 +613,7 @@ function renderMergeEntry(e) {
       unchanged: ['未改动，保留原稿', 'keep'],
       a_only: [`仅 A 修改，自动保留（${esc(mergeState.branch_a.name)}）`, 'a'],
       b_only: [`仅 B 修改，自动保留（${esc(mergeState.branch_b.name)}）`, 'b'],
-      both_same: ['双方改动一致（含演员归属），自动保留', 'keep']
+      both_same: ['双方改动一致（含演员归属与译文），自动保留', 'keep']
     };
     const [label, cls] = map[e.type];
     div.className = 'merge-entry';

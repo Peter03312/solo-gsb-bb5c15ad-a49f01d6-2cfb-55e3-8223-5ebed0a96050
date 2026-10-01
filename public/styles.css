@@ -95,8 +95,18 @@ table.seg-table { width: 100%; border-collapse: collapse; background: var(--pane
 .col-ord { width: 44px; color: var(--muted); text-align: center; }
 .col-src { width: 110px; }
 .col-actor { width: 132px; }
+.col-tr { width: 230px; }
 .col-time { width: 250px; }
 .col-ops { width: 180px; text-align: right; }
+
+/* 译文（双语字幕） */
+.tr-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+.tr-row button { padding: 3px 9px; font-size: 12px; }
+.tr-badge { display: inline-block; border-radius: 4px; padding: 1px 7px; font-size: 11px; white-space: nowrap; }
+.tr-badge.tr-none { background: #333847; color: var(--muted); }
+.tr-badge.tr-pending { background: #382e1a; color: var(--warn); }
+.tr-badge.tr-reviewed { background: #1f3326; color: var(--ok); }
+.cc-tr { margin-top: 4px; color: #a9bfff; font-size: 12px; }
 
 /* 演员归属 */
 select {

@@ -6,9 +6,10 @@
 //   - 普通区块：1 个来源 -> 1 个分支片段
 //   - 拆分区块：1 个来源 -> 多个分支片段
 //   - 合并区块：多个来源 -> 1 个分支片段
-// 遍历来源序号 1..N，对比两条分支在同一区间的区块：
-//   只有一方改动            -> 直接采用该方
-//   双方都触及同一来源区间  -> 冲突，展示双方内容由用户选择
+// 遍历来源序号 1..N，对比两条分支在同一区间的区块（文案/时码/结构、演员归属、
+// 译文与复核状态一并比较）：
+//   只有一方改动            -> 直接采用该方（含其译文与复核状态）
+//   双方都触及同一来源区间  -> 冲突，展示双方内容由用户选择，所选侧内容与状态一并进入合并分支
 //   双方均未改              -> 保留原稿
 
 /**
@@ -17,6 +18,7 @@
 function getBranchSegments(db, branchId) {
   return db.prepare(`
     SELECT bs.id, bs.ord, bs.start_ms, bs.end_ms, bs.text, bs.actor_id,
+           bs.translation, bs.translation_reviewed,
            ac.name AS actor_name,
            GROUP_CONCAT(ss.source_id) AS source_ids
     FROM branch_segments bs
@@ -33,6 +35,8 @@ function getBranchSegments(db, branchId) {
     text: row.text,
     actor_id: row.actor_id,
     actor_name: row.actor_name,
+    translation: row.translation ?? null,
+    translation_reviewed: row.translation_reviewed ? 1 : 0,
     source_ids: row.source_ids ? row.source_ids.split(',').map(Number) : []
   }));
 }
@@ -49,16 +53,22 @@ function segEqualOriginal(seg, src) {
 }
 
 /**
- * 单来源片段相对原稿「完全未动」：文案/时码相同且没有演员归属。
- * 仅指定演员（文案/时码未动）也算一侧改动，合并时由该侧继承归属。
+ * 单来源片段相对原稿「完全未动」：文案/时码相同、没有演员归属且没有译文。
+ * 仅指定演员或仅录入译文（文案/时码未动）也算一侧改动，合并时由该侧继承。
  */
 function segUnchangedSingle(seg, src) {
-  return !!src && seg.source_ids.length === 1 && seg.actor_id == null && segEqualOriginal(seg, src);
+  return !!src && seg.source_ids.length === 1 && seg.actor_id == null &&
+    !hasTr(seg) && segEqualOriginal(seg, src);
 }
+
+// 译文归一化：NULL/空白视为无译文；复核状态仅在有译文时有意义
+function trNorm(v) { return v == null ? '' : String(v); }
+function hasTr(seg) { return trNorm(seg.translation).trim() !== ''; }
+function trReviewed(seg) { return hasTr(seg) && seg.translation_reviewed ? 1 : 0; }
 
 /**
  * 两个结构块是否完全一致（用于判断双方是否做出相同改动）：
- * 片段数量、每条的时码/文案/演员归属、来源集合与顺序都相同。
+ * 片段数量、每条的时码/文案/演员归属/译文/复核状态、来源集合与顺序都相同。
  */
 function blocksEqual(ga, gb) {
   if (!ga || !gb || ga.segments.length !== gb.segments.length) return false;
@@ -67,6 +77,8 @@ function blocksEqual(ga, gb) {
     const b = gb.segments[i];
     if (a.start_ms !== b.start_ms || a.end_ms !== b.end_ms ||
         a.text !== b.text || a.actor_id !== b.actor_id) return false;
+    if (trNorm(a.translation) !== trNorm(b.translation) ||
+        trReviewed(a) !== trReviewed(b)) return false;
     const sa = a.source_ids.slice().sort((x, y) => x - y).join(',');
     const sb = b.source_ids.slice().sort((x, y) => x - y).join(',');
     if (sa !== sb) return false;
@@ -120,6 +132,8 @@ function segPayload(seg, srcBySeq) {
     text: seg.text,
     actor_id: seg.actor_id ?? null,
     actor_name: seg.actor_name ?? null,
+    translation: hasTr(seg) ? seg.translation : null,
+    translation_reviewed: trReviewed(seg),
     sources: seg.source_ids
       .map((id) => srcBySeq.idToSeq.get(id))
       .filter((s) => s != null)
@@ -273,6 +287,8 @@ function origPayload(src) {
     text: src.text,
     actor_id: null,
     actor_name: null,
+    translation: null,
+    translation_reviewed: 0,
     sources: [src.seq]
   };
 }
@@ -305,7 +321,7 @@ function applyMerge(db, opts, resolutions) {
     const branchId = branchInfo.lastInsertRowid;
 
     const insSeg = db.prepare(
-      'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, actor_id) VALUES (?, ?, ?, ?, ?, ?)'
+      'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, actor_id, translation, translation_reviewed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
     );
     const insLink = db.prepare(
       'INSERT INTO segment_sources (branch_segment_id, source_id) VALUES (?, ?)'
@@ -330,7 +346,10 @@ function applyMerge(db, opts, resolutions) {
           const ok = db.prepare('SELECT 1 FROM actors WHERE id = ? AND script_id = ?').get(actorId, opts.scriptId);
           if (!ok) actorId = null;
         }
-        const r = insSeg.run(branchId, ord++, g.start_ms, g.end_ms, g.text, actorId);
+        // 译文与复核状态随所选侧一并进入合并分支
+        const tr = g.translation != null && String(g.translation).trim() !== '' ? g.translation : null;
+        const trRev = tr != null && g.translation_reviewed ? 1 : 0;
+        const r = insSeg.run(branchId, ord++, g.start_ms, g.end_ms, g.text, actorId, tr, trRev);
         if (g.sources && g.sources.length) {
           for (const seq of g.sources) insLink.run(r.lastInsertRowid, seqToId.get(seq));
         } else {

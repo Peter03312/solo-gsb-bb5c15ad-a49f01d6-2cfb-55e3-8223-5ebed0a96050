@@ -10,6 +10,7 @@ const { previewMerge, applyMerge, getBranchSegments } = require('./merge');
 const qc = require('./qc');
 const recut = require('./recut');
 const actors = require('./actors');
+const i18n = require('./translation');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -188,13 +189,14 @@ app.patch('/api/branches/:id/segments/:sid', (req, res, next) => {
     const segId = parseInt(req.params.sid, 10);
     getBranchOr404(branchId);
     const seg = db.prepare(
-      'SELECT id, ord, start_ms, end_ms, text FROM branch_segments WHERE id = ? AND branch_id = ?'
+      'SELECT id, ord, start_ms, end_ms, text, translation FROM branch_segments WHERE id = ? AND branch_id = ?'
     ).get(segId, branchId);
     if (!seg) throw httpError(404, '片段不存在');
 
     const fields = [];
     const values = [];
     let changed = false;
+    let textChanged = false;
     if (req.body.start_ms !== undefined) {
       const v = readMs(req.body, 'start_ms');
       if (v !== seg.start_ms) changed = true;
@@ -207,7 +209,7 @@ app.patch('/api/branches/:id/segments/:sid', (req, res, next) => {
     }
     if (req.body.text !== undefined) {
       if (typeof req.body.text !== 'string') throw httpError(400, 'text 必须为字符串');
-      if (req.body.text !== seg.text) changed = true;
+      if (req.body.text !== seg.text) { changed = true; textChanged = true; }
       fields.push('text = ?');
       values.push(req.body.text);
     }
@@ -215,9 +217,15 @@ app.patch('/api/branches/:id/segments/:sid', (req, res, next) => {
 
     // 文案/时码任一实质变化即推进片段修订计数，使按片段绑定的质检豁免失效
     if (changed) { fields.push('rev = rev + 1'); }
+    // 原文改动：译文保留供参考，但复核状态转为待复核；纯时码调整不影响复核状态
+    if (textChanged) { fields.push('translation_reviewed = 0'); }
     values.push(segId);
     db.prepare(`UPDATE branch_segments SET ${fields.join(', ')} WHERE id = ?`).run(...values);
-    res.json({ ok: true, rev_bumped: changed });
+    res.json({
+      ok: true,
+      rev_bumped: changed,
+      translation_stale: textChanged && i18n.hasTranslation(seg.translation)
+    });
   } catch (e) {
     next(e);
   }
@@ -232,7 +240,7 @@ app.post('/api/branches/:id/segments/:sid/split', (req, res, next) => {
     const cut = readMs(req.body, 'cut_ms');
 
     const seg = db.prepare(
-      'SELECT id, ord, start_ms, end_ms, text, actor_id, rev FROM branch_segments WHERE id = ? AND branch_id = ?'
+      'SELECT id, ord, start_ms, end_ms, text, actor_id, rev, translation FROM branch_segments WHERE id = ? AND branch_id = ?'
     ).get(segId, branchId);
     if (!seg) throw httpError(404, '片段不存在');
     if (!(cut > seg.start_ms && cut < seg.end_ms)) {
@@ -241,12 +249,13 @@ app.post('/api/branches/:id/segments/:sid/split', (req, res, next) => {
 
     db.transaction(() => {
       db.prepare('UPDATE branch_segments SET ord = ord + 1 WHERE branch_id = ? AND ord > ?').run(branchId, seg.ord);
-      // 切点/边界变化：两条都视为新修订，旧豁免不得沿用；演员归属沿用原片段
-      db.prepare('UPDATE branch_segments SET end_ms = ?, ord = ?, rev = rev + 1 WHERE id = ?')
+      // 切点/边界变化：两条都视为新修订，旧豁免不得沿用；演员归属沿用原片段；
+      // 两条均保留原译文作参考，且都转为待复核
+      db.prepare('UPDATE branch_segments SET end_ms = ?, ord = ?, rev = rev + 1, translation_reviewed = 0 WHERE id = ?')
         .run(cut, seg.ord, segId);
       const newId = db.prepare(
-        'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, actor_id, rev) VALUES (?, ?, ?, ?, ?, ?, ?)'
-      ).run(branchId, seg.ord + 1, cut, seg.end_ms, seg.text, seg.actor_id, seg.rev + 1).lastInsertRowid;
+        'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, actor_id, rev, translation, translation_reviewed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)'
+      ).run(branchId, seg.ord + 1, cut, seg.end_ms, seg.text, seg.actor_id, seg.rev + 1, seg.translation ?? null).lastInsertRowid;
       const links = db.prepare(
         'SELECT source_id FROM segment_sources WHERE branch_segment_id = ?'
       ).all(segId);
@@ -254,7 +263,12 @@ app.post('/api/branches/:id/segments/:sid/split', (req, res, next) => {
       links.forEach((l) => ins.run(newId, l.source_id));
     })();
 
-    res.status(201).json({ ok: true, actor_id: seg.actor_id, actor_carried: true });
+    res.status(201).json({
+      ok: true,
+      actor_id: seg.actor_id,
+      actor_carried: true,
+      translation_carried: i18n.hasTranslation(seg.translation)
+    });
   } catch (e) {
     next(e);
   }
@@ -267,11 +281,11 @@ app.post('/api/branches/:id/segments/:sid/merge-with-next', (req, res, next) => 
     getBranchOr404(branchId);
     const segId = parseInt(req.params.sid, 10);
     const seg = db.prepare(
-      'SELECT id, ord, start_ms, end_ms, text, actor_id FROM branch_segments WHERE id = ? AND branch_id = ?'
+      'SELECT id, ord, start_ms, end_ms, text, actor_id, translation FROM branch_segments WHERE id = ? AND branch_id = ?'
     ).get(segId, branchId);
     if (!seg) throw httpError(404, '片段不存在');
     const next = db.prepare(
-      'SELECT id, ord, start_ms, end_ms, text, actor_id FROM branch_segments WHERE branch_id = ? AND ord = ?'
+      'SELECT id, ord, start_ms, end_ms, text, actor_id, translation FROM branch_segments WHERE branch_id = ? AND ord = ?'
     ).get(branchId, seg.ord + 1);
     if (!next) throw httpError(400, '该片段已经是最后一条，无法与下一片段合并');
 
@@ -279,6 +293,11 @@ app.post('/api/branches/:id/segments/:sid/merge-with-next', (req, res, next) => 
     const mergedText = `${seg.text}${joiner}${next.text}`;
     // 演员归属：两条相同（含都为空）才沿用；不同则清空并提示重新指定
     const policy = actors.mergeActorPolicy(seg.actor_id, next.actor_id);
+    // 译文：按原顺序拼接两条已有译文（跳过空译文），合并后转为待复核
+    const trParts = [seg.translation, next.translation]
+      .filter((t) => i18n.hasTranslation(t))
+      .map((t) => String(t).trim());
+    const mergedTranslation = trParts.length ? trParts.join(joiner) : null;
 
     db.transaction(() => {
       const srcs = db.prepare(`
@@ -289,9 +308,9 @@ app.post('/api/branches/:id/segments/:sid/merge-with-next', (req, res, next) => 
       db.prepare('DELETE FROM segment_sources WHERE branch_segment_id IN (?, ?)').run(segId, next.id);
       db.prepare('DELETE FROM branch_segments WHERE id = ?').run(next.id);
       // 合并后文案/时码均可能变化：推进保留片段的修订计数，旧豁免失效；
-      // actor_id 按相同沿用 / 不同清空处理
-      db.prepare('UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, actor_id = ?, rev = rev + 1 WHERE id = ?')
-        .run(Math.min(seg.start_ms, next.start_ms), Math.max(seg.end_ms, next.end_ms), mergedText, policy.actor_id, segId);
+      // actor_id 按相同沿用 / 不同清空处理；译文拼接后一律待复核
+      db.prepare('UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, actor_id = ?, translation = ?, translation_reviewed = 0, rev = rev + 1 WHERE id = ?')
+        .run(Math.min(seg.start_ms, next.start_ms), Math.max(seg.end_ms, next.end_ms), mergedText, policy.actor_id, mergedTranslation, segId);
       const ins = db.prepare('INSERT INTO segment_sources (branch_segment_id, source_id) VALUES (?, ?)');
       srcs.forEach((x) => ins.run(segId, x.source_id));
       db.prepare('UPDATE branch_segments SET ord = ord - 1 WHERE branch_id = ? AND ord > ?')
@@ -302,7 +321,9 @@ app.post('/api/branches/:id/segments/:sid/merge-with-next', (req, res, next) => 
       ok: true,
       actor_carried: policy.carried,
       actor_id: policy.actor_id,
-      notice: policy.cleared_reason
+      notice: policy.cleared_reason,
+      translation_carried: mergedTranslation != null,
+      translation_pending: mergedTranslation != null
     });
   } catch (e) {
     next(e);
@@ -310,6 +331,7 @@ app.post('/api/branches/:id/segments/:sid/merge-with-next', (req, res, next) => 
 });
 
 // 将分支片段恢复为原稿内容（按其来源；若一个片段挂多个来源则恢复为第一条来源）
+// 恢复原稿同时清空该片段译文（译文与原文绑定，原文还原后译文不再适用）
 app.post('/api/branches/:id/segments/:sid/reset', (req, res, next) => {
   try {
     const branchId = parseInt(req.params.id, 10);
@@ -323,27 +345,29 @@ app.post('/api/branches/:id/segments/:sid/reset', (req, res, next) => {
       ORDER BY src.seq LIMIT 1
     `).get(segId);
     if (!row) throw httpError(400, '该片段找不到对应原稿来源，无法恢复');
-    const cur = db.prepare('SELECT start_ms, end_ms, text FROM branch_segments WHERE id = ?').get(segId);
+    const cur = db.prepare('SELECT start_ms, end_ms, text, translation FROM branch_segments WHERE id = ?').get(segId);
     const changed = !cur || cur.start_ms !== row.start_ms || cur.end_ms !== row.end_ms || cur.text !== row.text;
+    const hadTranslation = !!cur && i18n.hasTranslation(cur.translation);
     db.prepare(
       changed
-        ? 'UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, rev = rev + 1 WHERE id = ?'
-        : 'UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ? WHERE id = ?'
+        ? 'UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, translation = NULL, translation_reviewed = 0, rev = rev + 1 WHERE id = ?'
+        : 'UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, translation = NULL, translation_reviewed = 0 WHERE id = ?'
     ).run(row.start_ms, row.end_ms, row.text, segId);
-    res.json({ ok: true, rev_bumped: changed });
+    res.json({ ok: true, rev_bumped: changed, translation_cleared: hadTranslation });
   } catch (e) {
     next(e);
   }
 });
 
 // 整条分支重置回原稿（文案/时码恢复原样；演员归属按来源保留——
-// 同一来源只对应一名演员时沿用，来源曾被拆分给不同演员等存在歧义时清空）
+// 同一来源只对应一名演员时沿用，来源曾被拆分给不同演员等存在歧义时清空；
+// 整支重置会清空该分支全部译文）
 app.post('/api/branches/:id/reset-all', (req, res, next) => {
   try {
     const id = parseInt(req.params.id, 10);
     const branch = getBranchOr404(id);
     if (branch.kind === 'merged') throw httpError(400, '合并结果分支不可整体重置');
-    db.transaction(() => {
+    const translationsCleared = db.transaction(() => {
       // 先按来源收集当前归属（仅当该来源的所有现存片段归属同一演员时才沿用）
       const rows = db.prepare(`
         SELECT ss.source_id AS source_id, bs.actor_id AS actor_id
@@ -361,6 +385,10 @@ app.post('/api/branches/:id/reset-all', (req, res, next) => {
         actorBySource.set(sourceId, set.size === 1 ? [...set][0] : null);
       }
 
+      const trCount = db.prepare(
+        "SELECT COUNT(*) AS n FROM branch_segments WHERE branch_id = ? AND translation IS NOT NULL AND TRIM(translation) <> ''"
+      ).get(id).n;
+
       db.prepare('DELETE FROM segment_sources WHERE branch_segment_id IN (SELECT id FROM branch_segments WHERE branch_id = ?)').run(id);
       db.prepare('DELETE FROM branch_segments WHERE branch_id = ?').run(id);
       const sources = db.prepare(
@@ -376,8 +404,9 @@ app.post('/api/branches/:id/reset-all', (req, res, next) => {
         const segId = insSeg.run(id, i + 1, s.start_ms, s.end_ms, s.text, actorBySource.get(s.id) ?? null).lastInsertRowid;
         insLink.run(segId, s.id);
       });
+      return trCount;
     })();
-    res.json({ ok: true });
+    res.json({ ok: true, translations_cleared: translationsCleared });
   } catch (e) {
     next(e);
   }
@@ -488,6 +517,77 @@ app.get('/api/branches/:id/cue-sheet/export', (req, res, next) => {
     const fname = `${script.name}-${branch.name}-演员走词单.txt`;
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fname)}`);
     res.type('text/plain; charset=utf-8').send(body);
+  } catch (e) { next(e); }
+});
+
+// ---------------- 译文与双语导出 ----------------
+
+// 录入/清除片段译文（body: {translation}；空串清除。内容变化即转为待复核，不推进 rev）
+app.put('/api/branches/:id/segments/:sid/translation', (req, res, next) => {
+  try {
+    const branchId = parseInt(req.params.id, 10);
+    const segId = parseInt(req.params.sid, 10);
+    const branch = getBranchOr404(branchId);
+    if (!req.body || !Object.prototype.hasOwnProperty.call(req.body, 'translation')) {
+      throw httpError(400, '需要提供 translation（传空字符串清除译文）');
+    }
+    const result = i18n.setTranslation(db, branch, segId, req.body.translation);
+    res.json(result);
+  } catch (e) { next(e); }
+});
+
+// 标记/取消译文复核（body: {reviewed: true|false}；空译文不能标记已复核）
+app.put('/api/branches/:id/segments/:sid/translation/review', (req, res, next) => {
+  try {
+    const branchId = parseInt(req.params.id, 10);
+    const segId = parseInt(req.params.sid, 10);
+    const branch = getBranchOr404(branchId);
+    if (!req.body || !Object.prototype.hasOwnProperty.call(req.body, 'reviewed')) {
+      throw httpError(400, '需要提供 reviewed（布尔值）');
+    }
+    const result = i18n.setReviewed(db, branch, segId, req.body.reviewed);
+    res.json(result);
+  } catch (e) { next(e); }
+});
+
+// 双语导出检查：列出空译文、待复核片段与时间线问题（不生成文件）
+app.get('/api/branches/:id/bilingual/validate', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    getBranchOr404(id);
+    const segments = getBranchSegments(db, id);
+    const gate = i18n.bilingualGate(segments);
+    res.json({
+      ok: gate.can_export,
+      segment_count: segments.length,
+      translated: segments.filter((s) => i18n.hasTranslation(s.translation)).length,
+      reviewed: segments.filter((s) => i18n.hasTranslation(s.translation) && s.translation_reviewed).length,
+      bilingual_issues: gate.bilingual_issues,
+      timeline_issues: gate.timeline_issues
+    });
+  } catch (e) { next(e); }
+});
+
+// 导出双语 SRT：逐段输出原文与译文，沿用当前时码与连续编号；
+// 任何空译文、待复核片段或时间线错误都列出片段并拒绝整份导出
+app.get('/api/branches/:id/export-bilingual', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const branch = getBranchOr404(id);
+    const segments = getBranchSegments(db, id);
+    const gate = i18n.bilingualGate(segments);
+    if (!gate.can_export) {
+      throw httpError(
+        409,
+        `双语字幕导出被拒绝（空译文/待复核 ${gate.bilingual_issues.length} 条，时间线问题 ${gate.timeline_issues.length} 处），请逐条处理后再导出`,
+        { bilingual_issues: gate.bilingual_issues, timeline_issues: gate.timeline_issues }
+      );
+    }
+    const script = db.prepare('SELECT name FROM scripts WHERE id = ?').get(branch.script_id);
+    const body = i18n.toBilingualSrt(segments);
+    const fname = `${script.name}-${branch.name}-双语.srt`;
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fname)}`);
+    res.type('application/x-subrip; charset=utf-8').send(body);
   } catch (e) { next(e); }
 });
 
@@ -749,6 +849,7 @@ app.use((err, req, res, next) => {
     ...(err.qc_errors ? { qc_errors: err.qc_errors } : {}),
     ...(err.timeline_issues ? { timeline_issues: err.timeline_issues } : {}),
     ...(err.unassigned ? { unassigned: err.unassigned } : {}),
+    ...(err.bilingual_issues ? { bilingual_issues: err.bilingual_issues } : {}),
     ...(err.unresolved_hits ? { unresolved_hits: err.unresolved_hits } : {}),
     ...(err.invalid_exemptions ? { invalid_exemptions: err.invalid_exemptions } : {}),
     ...(err.report_stale != null ? { report_stale: err.report_stale } : {}),

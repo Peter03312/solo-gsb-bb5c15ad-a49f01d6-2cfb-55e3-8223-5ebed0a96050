@@ -359,3 +359,42 @@ table.qc-table { width: 100%; border-collapse: collapse; border: 1px solid var(-
 }
 #cuePanel .col-cue-tc { width: 190px; }
 #cuePanel .col-cue-src { width: 90px; color: var(--muted); }
+
+/* ---------------- 双语译文 ---------------- */
+.col-translation { min-width: 240px; }
+.tr-controls { display: flex; align-items: center; gap: 8px; margin-top: 5px; flex-wrap: wrap; }
+.tr-btn {
+  padding: 2px 9px; font-size: 11px; border-radius: 5px;
+}
+.tr-btn.tr-on { border-color: #2f5a3f; color: var(--ok); }
+.tr-badge {
+  display: inline-block;
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.tr-badge.reviewed { background: #243a2c; color: var(--ok); }
+.tr-badge.pending { background: #382e1a; color: var(--warn); }
+.tr-badge.missing { background: #332024; color: #f2b3b8; }
+tr.tr-row-missing td.col-translation { box-shadow: inset 3px 0 0 #6e3941; }
+tr.tr-row-pending td.col-translation { box-shadow: inset 3px 0 0 #6b5426; }
+
+/* 合并卡片中的原文 / 译文 */
+.choice-card .cc-seg .cc-src { white-space: pre-wrap; }
+.choice-card .cc-seg .cc-tr {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border);
+  color: #a9c8ff;
+  font-size: 12px;
+}
+.choice-card .cc-seg .cc-tr.none { color: var(--muted); }
+
+#translationPanel {
+  margin-top: 22px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px 18px;
+}

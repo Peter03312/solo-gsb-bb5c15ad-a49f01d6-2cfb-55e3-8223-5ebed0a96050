@@ -183,4 +183,15 @@ function toSrt(segments) {
   }).join('\n\n') + '\n';
 }
 
-module.exports = { parseSrt, validateTimeline, toSrt, msToSrt, parseTime };
+/**
+ * 序列化为双语 SRT：每个条目正文先输出原文、空一行再输出译文。
+ * 调用方负责先通过双语导出闸门（无空译文、无待复核、时间线无误）。
+ */
+function toBilingualSrt(segments) {
+  return segments.map((s, idx) => {
+    const body = `${String(s.text).replace(/\s+$/g, '')}\n\n${String(s.translation || '').replace(/\s+$/g, '')}`;
+    return `${idx + 1}\n${msToSrt(s.start_ms)} --> ${msToSrt(s.end_ms)}\n${body}`;
+  }).join('\n\n') + '\n';
+}
+
+module.exports = { parseSrt, validateTimeline, toSrt, toBilingualSrt, msToSrt, parseTime };

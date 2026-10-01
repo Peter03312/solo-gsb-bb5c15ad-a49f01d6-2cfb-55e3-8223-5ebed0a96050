@@ -80,6 +80,8 @@ function recutStateHash(segments, revById) {
     s.id, s.ord, s.start_ms, s.end_ms, s.text,
     (s.source_ids || []).slice().sort((a, b) => a - b),
     s.actor_id ?? null,
+    s.translation || '',
+    s.translation_reviewed ? 1 : 0,
     revById.get(s.id) ?? 1
   ]);
   return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');

@@ -8,6 +8,7 @@ const state = {
   script: null,        // 稿件详情
   actors: [],          // 当前稿件演员名单
   cue: null,           // 当前分支走词单数据
+  translation: null,   // 当前分支译文复核闸门数据
   branchId: null,
   branch: null,        // 当前分支数据
   sourceBySeq: new Map()
@@ -123,6 +124,7 @@ async function selectBranch(id) {
   state.branch = await api(`/api/branches/${id}`);
   renderTabs();
   renderEditor();
+  await refreshTranslationPanel();
   await refreshCuePanel();
   await refreshQcPanel();
 }
@@ -157,11 +159,12 @@ function renderEditor() {
       <button id="btnResetAll">整条重置为原稿</button>
       <a class="btn" id="btnCueExport" href="/api/branches/${b.id}/cue-sheet/export" download>下载演员走词单</a>
       <a class="btn" id="btnExport" href="/api/branches/${b.id}/export" download>导出 SRT</a>
+      <a class="btn primary" id="btnExportBi" href="/api/branches/${b.id}/export-bilingual" download>导出双语 SRT</a>
     </div>
     <div id="validateResult"></div>
     <table class="seg-table">
       <thead><tr>
-        <th class="col-ord">#</th><th class="col-src">来源片段</th><th class="col-actor">演员</th><th>文案</th><th class="col-time">起止时间</th><th class="col-ops">操作</th>
+        <th class="col-ord">#</th><th class="col-src">来源片段</th><th class="col-actor">演员</th><th>原文</th><th>译文（供海外演员阅读）</th><th class="col-time">起止时间</th><th class="col-ops">操作</th>
       </tr></thead>
       <tbody>`;
 
@@ -176,8 +179,15 @@ function renderEditor() {
       .concat(state.actors.map((a) =>
         `<option value="${a.id}" ${a.id === seg.actor_id ? 'selected' : ''}>${esc(a.name)}</option>`))
       .join('');
+    const trText = seg.translation || '';
+    const trEmpty = trText.trim() === '';
+    const trStatus = trEmpty
+      ? '<span class="tr-badge missing">未翻译</span>'
+      : seg.translation_reviewed
+        ? '<span class="tr-badge reviewed">已复核</span>'
+        : '<span class="tr-badge pending">待复核</span>';
     html += `
-      <tr data-id="${seg.id}" class="${unassigned ? 'row-unassigned' : ''}">
+      <tr data-id="${seg.id}" class="${unassigned ? 'row-unassigned' : ''} ${trEmpty ? 'tr-row-missing' : seg.translation_reviewed ? '' : 'tr-row-pending'}">
         <td class="col-ord">${seg.ord}</td>
         <td class="col-src">${tags}${changed}</td>
         <td class="col-actor">
@@ -185,6 +195,14 @@ function renderEditor() {
           ${unassigned ? '<div class="actor-warn">未归属</div>' : ''}
         </td>
         <td><textarea rows="2" data-field="text">${esc(seg.text)}</textarea></td>
+        <td class="col-translation">
+          <textarea rows="2" data-field="translation" placeholder="录入译文…">${esc(trText)}</textarea>
+          <div class="tr-controls">
+            ${trStatus}
+            <button type="button" data-act="tr-save" class="tr-btn">保存译文</button>
+            <button type="button" data-act="tr-review" class="tr-btn ${seg.translation_reviewed ? 'tr-on' : ''}">${seg.translation_reviewed ? '✓ 已复核（取消）' : '标记已复核'}</button>
+          </div>
+        </td>
         <td class="col-time">
           <div class="time-row">
             <input type="text" data-field="start_ms" value="${msToTc(seg.start_ms)}">
@@ -213,6 +231,10 @@ function renderEditor() {
     e.preventDefault();
     exportSrt();
   };
+  $('#btnExportBi').onclick = (e) => {
+    e.preventDefault();
+    exportBilingualSrt();
+  };
 
   $$('#editor tbody tr').forEach((tr) => {
     const id = Number(tr.dataset.id);
@@ -221,6 +243,8 @@ function renderEditor() {
     tr.querySelector('[data-act=merge]').onclick = () => mergeWithNext(id);
     tr.querySelector('[data-act=reset]').onclick = () => resetSegment(id);
     tr.querySelector('[data-field=actor]').onchange = (ev) => assignActor(id, ev.target.value === '' ? null : Number(ev.target.value), ev.target);
+    tr.querySelector('[data-act=tr-save]').onclick = () => saveTranslation(tr, id);
+    tr.querySelector('[data-act=tr-review]').onclick = () => toggleReview(tr, id);
   });
 }
 
@@ -248,6 +272,31 @@ async function saveSegment(tr, id) {
       method: 'PATCH', body: { start_ms: start, end_ms: end, text }
     });
     toast('片段已保存', 'ok');
+    await selectBranch(state.branchId);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+// 保存某行译文（只写译文，不改原文/时码/质检）
+async function saveTranslation(tr, id) {
+  const translation = tr.querySelector('[data-field=translation]').value;
+  try {
+    await api(`/api/branches/${state.branchId}/segments/${id}/translation`, {
+      method: 'PUT', body: { translation }
+    });
+    toast(translation.trim() === '' ? '译文已清空' : '译文已保存（待复核）', 'ok');
+    await selectBranch(state.branchId);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+// 切换复核状态：空译文时服务器会拒绝
+async function toggleReview(tr, id) {
+  const seg = state.branch.segments.find((s) => s.id === id);
+  const next = !(seg && seg.translation_reviewed);
+  try {
+    await api(`/api/branches/${state.branchId}/segments/${id}/translation/review`, {
+      method: 'PUT', body: { reviewed: next }
+    });
+    toast(next ? '已标记复核' : '已取消复核', 'ok');
     await selectBranch(state.branchId);
   } catch (e) { toast(e.message, 'error'); }
 }
@@ -363,6 +412,37 @@ async function exportSrt() {
   }
 }
 
+// ---------------- 双语译文 ----------------
+
+async function exportBilingualSrt() {
+  try {
+    const resp = await fetch(`/api/branches/${state.branchId}/export-bilingual`);
+    if (!resp.ok) {
+      const data = await resp.json();
+      const lines = [data.error];
+      (data.missing || []).forEach((u) =>
+        lines.push(`· 空译文 片段 #${u.ord}（${u.timecode}）${u.text_excerpt ? '：' + u.text_excerpt : ''}`));
+      (data.pending || []).forEach((u) =>
+        lines.push(`· 待复核 片段 #${u.ord}（${u.timecode}）${u.text_excerpt ? '：' + u.text_excerpt : ''}`));
+      (data.timeline_issues || []).forEach((i) =>
+        lines.push(`· 时间线${i.ord ? ` #${i.ord}` : ''}：${i.message}`));
+      return toast(lines.join('\n'), 'error');
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = /filename\*=UTF-8''(.+)$/.exec(cd);
+    const fname = m ? decodeURIComponent(m[1]) : 'bilingual.srt';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('已导出双语 SRT', 'ok');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
 // ---------------- 导入 ----------------
 
 $('#btnImport').onclick = () => {
@@ -452,13 +532,25 @@ function renderMergeDialog() {
   updateMergeSubmit();
 }
 
+function trMiniBadge(seg) {
+  const t = (seg.translation || '').trim();
+  if (!t) return '<span class="tr-badge missing">未翻译</span>';
+  return seg.translation_reviewed
+    ? '<span class="tr-badge reviewed">已复核</span>'
+    : '<span class="tr-badge pending">待复核</span>';
+}
+
 function renderSegMini(seg) {
   const actor = seg.actor_name
     ? `<span class="cue-actor-tag">🎭 ${esc(seg.actor_name)}</span>`
     : '<span class="cue-actor-tag none">未归属</span>';
+  const trLine = (seg.translation && seg.translation.trim())
+    ? `<div class="cc-tr">${trMiniBadge(seg)} ${esc(seg.translation).replace(/\n/g, '<br>')}</div>`
+    : `<div class="cc-tr none">${trMiniBadge(seg)}</div>`;
   return `<div class="cc-seg">
     <div class="t">${msToTc(seg.start_ms)} → ${msToTc(seg.end_ms)} ${actor}</div>
-    <div>${esc(seg.text).replace(/\n/g, '<br>')}</div>
+    <div class="cc-src">${esc(seg.text).replace(/\n/g, '<br>')}</div>
+    ${trLine}
   </div>`;
 }
 
@@ -497,7 +589,7 @@ function renderMergeEntry(e) {
       unchanged: ['未改动，保留原稿', 'keep'],
       a_only: [`仅 A 修改，自动保留（${esc(mergeState.branch_a.name)}）`, 'a'],
       b_only: [`仅 B 修改，自动保留（${esc(mergeState.branch_b.name)}）`, 'b'],
-      both_same: ['双方改动一致（含演员归属），自动保留', 'keep']
+      both_same: ['双方改动一致（含演员归属与译文/复核状态），自动保留', 'keep']
     };
     const [label, cls] = map[e.type];
     div.className = 'merge-entry';
@@ -743,6 +835,53 @@ $('#actorAddBtn').onclick = submitNewActor;
 $('#actorNameInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); submitNewActor(); }
 });
+
+// ---------------- 双语译文面板（复核进度与阻断原因） ----------------
+
+async function refreshTranslationPanel() {
+  if (!state.branchId) { $('#translationPanel').innerHTML = ''; return; }
+  try {
+    const g = await api(`/api/branches/${state.branchId}/translations`);
+    state.translation = g;
+    renderTranslationPanel(g);
+  } catch (e) {
+    $('#translationPanel').innerHTML = '';
+  }
+}
+
+function renderTranslationPanel(g) {
+  const panel = $('#translationPanel');
+  const pct = g.total ? Math.round((g.reviewed / g.total) * 100) : 0;
+  let html = `
+    <div class="qc-head">
+      <div class="qc-title">双语译文与复核
+        <span class="src-tag">共 ${g.total} 条</span>
+        <span class="src-tag">已译 ${g.translated}</span>
+        <span class="src-tag">已复核 ${g.reviewed}（${pct}%）</span>
+      </div>
+      <div class="qc-actions">
+        <button id="btnTrRefresh">刷新</button>
+        <button id="btnTrDl" class="primary">导出双语 SRT</button>
+      </div>
+    </div>`;
+
+  if (g.can_export) {
+    html += '<div class="qc-banner ok">✓ 全部片段已录入译文且已复核，时间线无误，可以导出双语 SRT。</div>';
+  } else {
+    const items = [];
+    g.missing.forEach((u) => items.push(
+      `<li><span class="e-line">空译文 片段 #${u.ord}</span>（${u.timecode}）${u.text_excerpt ? `：${esc(u.text_excerpt)}` : ''}</li>`));
+    g.pending.forEach((u) => items.push(
+      `<li><span class="e-line">待复核 片段 #${u.ord}</span>（${u.timecode}）${u.text_excerpt ? `：${esc(u.text_excerpt)}` : ''}</li>`));
+    g.timeline_issues.forEach((i) => items.push(
+      `<li><span class="e-line">时间线${i.ord ? ` 片段 #${i.ord}` : ''}</span>：${esc(i.message)}</li>`));
+    html += `<div class="qc-banner bad">✗ 双语字幕导出被阻止：空译文 ${g.missing.length} 条、待复核 ${g.pending.length} 条、时间线问题 ${g.timeline_issues.length} 处。请逐条处理：
+      <ul class="issue-list">${items.join('')}</ul></div>`;
+  }
+  panel.innerHTML = html;
+  $('#btnTrRefresh').onclick = refreshTranslationPanel;
+  $('#btnTrDl').onclick = exportBilingualSrt;
+}
 
 // ---------------- 演员走词单 ----------------
 

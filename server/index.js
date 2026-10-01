@@ -5,11 +5,12 @@ const fs = require('fs');
 const express = require('express');
 const multer = require('multer');
 const db = require('./db');
-const { parseSrt, validateTimeline, toSrt, msToSrt } = require('./srt');
+const { parseSrt, validateTimeline, toSrt, toBilingualSrt, msToSrt } = require('./srt');
 const { previewMerge, applyMerge, getBranchSegments } = require('./merge');
 const qc = require('./qc');
 const recut = require('./recut');
 const actors = require('./actors');
+const translations = require('./translations');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -195,6 +196,7 @@ app.patch('/api/branches/:id/segments/:sid', (req, res, next) => {
     const fields = [];
     const values = [];
     let changed = false;
+    let textChanged = false;
     if (req.body.start_ms !== undefined) {
       const v = readMs(req.body, 'start_ms');
       if (v !== seg.start_ms) changed = true;
@@ -207,17 +209,20 @@ app.patch('/api/branches/:id/segments/:sid', (req, res, next) => {
     }
     if (req.body.text !== undefined) {
       if (typeof req.body.text !== 'string') throw httpError(400, 'text 必须为字符串');
-      if (req.body.text !== seg.text) changed = true;
+      if (req.body.text !== seg.text) { changed = true; textChanged = true; }
       fields.push('text = ?');
       values.push(req.body.text);
     }
     if (!fields.length) throw httpError(400, '没有需要更新的字段');
 
-    // 文案/时码任一实质变化即推进片段修订计数，使按片段绑定的质检豁免失效
+    // 文案/时码任一实质变化即推进片段修订计数，使按片段绑定的质检豁免失效。
+    // 原文改动后保留译文供参考，但译文与原文绑定 -> 置为待复核；
+    // 纯时码调整（文案未变）不影响复核状态。
     if (changed) { fields.push('rev = rev + 1'); }
+    if (textChanged) { fields.push('translation_reviewed = 0'); }
     values.push(segId);
     db.prepare(`UPDATE branch_segments SET ${fields.join(', ')} WHERE id = ?`).run(...values);
-    res.json({ ok: true, rev_bumped: changed });
+    res.json({ ok: true, rev_bumped: changed, translation_reset_review: textChanged });
   } catch (e) {
     next(e);
   }
@@ -232,7 +237,7 @@ app.post('/api/branches/:id/segments/:sid/split', (req, res, next) => {
     const cut = readMs(req.body, 'cut_ms');
 
     const seg = db.prepare(
-      'SELECT id, ord, start_ms, end_ms, text, actor_id, rev FROM branch_segments WHERE id = ? AND branch_id = ?'
+      'SELECT id, ord, start_ms, end_ms, text, actor_id, translation, translation_reviewed, rev FROM branch_segments WHERE id = ? AND branch_id = ?'
     ).get(segId, branchId);
     if (!seg) throw httpError(404, '片段不存在');
     if (!(cut > seg.start_ms && cut < seg.end_ms)) {
@@ -241,12 +246,13 @@ app.post('/api/branches/:id/segments/:sid/split', (req, res, next) => {
 
     db.transaction(() => {
       db.prepare('UPDATE branch_segments SET ord = ord + 1 WHERE branch_id = ? AND ord > ?').run(branchId, seg.ord);
-      // 切点/边界变化：两条都视为新修订，旧豁免不得沿用；演员归属沿用原片段
-      db.prepare('UPDATE branch_segments SET end_ms = ?, ord = ?, rev = rev + 1 WHERE id = ?')
+      // 切点/边界变化：两条都视为新修订，旧豁免不得沿用；演员归属沿用原片段。
+      // 两条均保留原译文作参考，但按待复核处理。
+      db.prepare('UPDATE branch_segments SET end_ms = ?, ord = ?, translation_reviewed = 0, rev = rev + 1 WHERE id = ?')
         .run(cut, seg.ord, segId);
       const newId = db.prepare(
-        'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, actor_id, rev) VALUES (?, ?, ?, ?, ?, ?, ?)'
-      ).run(branchId, seg.ord + 1, cut, seg.end_ms, seg.text, seg.actor_id, seg.rev + 1).lastInsertRowid;
+        'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, actor_id, translation, translation_reviewed, rev) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)'
+      ).run(branchId, seg.ord + 1, cut, seg.end_ms, seg.text, seg.actor_id, seg.translation || '', seg.rev + 1).lastInsertRowid;
       const links = db.prepare(
         'SELECT source_id FROM segment_sources WHERE branch_segment_id = ?'
       ).all(segId);
@@ -267,11 +273,11 @@ app.post('/api/branches/:id/segments/:sid/merge-with-next', (req, res, next) => 
     getBranchOr404(branchId);
     const segId = parseInt(req.params.sid, 10);
     const seg = db.prepare(
-      'SELECT id, ord, start_ms, end_ms, text, actor_id FROM branch_segments WHERE id = ? AND branch_id = ?'
+      'SELECT id, ord, start_ms, end_ms, text, actor_id, translation FROM branch_segments WHERE id = ? AND branch_id = ?'
     ).get(segId, branchId);
     if (!seg) throw httpError(404, '片段不存在');
     const next = db.prepare(
-      'SELECT id, ord, start_ms, end_ms, text, actor_id FROM branch_segments WHERE branch_id = ? AND ord = ?'
+      'SELECT id, ord, start_ms, end_ms, text, actor_id, translation FROM branch_segments WHERE branch_id = ? AND ord = ?'
     ).get(branchId, seg.ord + 1);
     if (!next) throw httpError(400, '该片段已经是最后一条，无法与下一片段合并');
 
@@ -279,6 +285,11 @@ app.post('/api/branches/:id/segments/:sid/merge-with-next', (req, res, next) => 
     const mergedText = `${seg.text}${joiner}${next.text}`;
     // 演员归属：两条相同（含都为空）才沿用；不同则清空并提示重新指定
     const policy = actors.mergeActorPolicy(seg.actor_id, next.actor_id);
+    // 译文：按原顺序拼接已有译文（跳过空译文），合并后一律待复核
+    const mergedTranslation = [seg.translation, next.translation]
+      .map((t) => (typeof t === 'string' ? t.trim() : ''))
+      .filter(Boolean)
+      .join(joiner);
 
     db.transaction(() => {
       const srcs = db.prepare(`
@@ -289,9 +300,9 @@ app.post('/api/branches/:id/segments/:sid/merge-with-next', (req, res, next) => 
       db.prepare('DELETE FROM segment_sources WHERE branch_segment_id IN (?, ?)').run(segId, next.id);
       db.prepare('DELETE FROM branch_segments WHERE id = ?').run(next.id);
       // 合并后文案/时码均可能变化：推进保留片段的修订计数，旧豁免失效；
-      // actor_id 按相同沿用 / 不同清空处理
-      db.prepare('UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, actor_id = ?, rev = rev + 1 WHERE id = ?')
-        .run(Math.min(seg.start_ms, next.start_ms), Math.max(seg.end_ms, next.end_ms), mergedText, policy.actor_id, segId);
+      // actor_id 按相同沿用 / 不同清空处理；译文按原顺序拼接且待复核
+      db.prepare('UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, actor_id = ?, translation = ?, translation_reviewed = 0, rev = rev + 1 WHERE id = ?')
+        .run(Math.min(seg.start_ms, next.start_ms), Math.max(seg.end_ms, next.end_ms), mergedText, policy.actor_id, mergedTranslation, segId);
       const ins = db.prepare('INSERT INTO segment_sources (branch_segment_id, source_id) VALUES (?, ?)');
       srcs.forEach((x) => ins.run(segId, x.source_id));
       db.prepare('UPDATE branch_segments SET ord = ord - 1 WHERE branch_id = ? AND ord > ?')
@@ -325,10 +336,11 @@ app.post('/api/branches/:id/segments/:sid/reset', (req, res, next) => {
     if (!row) throw httpError(400, '该片段找不到对应原稿来源，无法恢复');
     const cur = db.prepare('SELECT start_ms, end_ms, text FROM branch_segments WHERE id = ?').get(segId);
     const changed = !cur || cur.start_ms !== row.start_ms || cur.end_ms !== row.end_ms || cur.text !== row.text;
+    // 恢复原稿：清空该片段译文（译文与原文绑定，恢复后需重新翻译/复核）
     db.prepare(
       changed
-        ? 'UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, rev = rev + 1 WHERE id = ?'
-        : 'UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ? WHERE id = ?'
+        ? 'UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, translation = NULL, translation_reviewed = 0, rev = rev + 1 WHERE id = ?'
+        : 'UPDATE branch_segments SET start_ms = ?, end_ms = ?, text = ?, translation = NULL, translation_reviewed = 0 WHERE id = ?'
     ).run(row.start_ms, row.end_ms, row.text, segId);
     res.json({ ok: true, rev_bumped: changed });
   } catch (e) {
@@ -446,6 +458,107 @@ app.put('/api/branches/:id/segments/:sid/actor', (req, res, next) => {
     const actorId = raw === null ? null : parseInt(raw, 10);
     const result = actors.assignActor(db, branch, segId, actorId);
     res.json(result);
+  } catch (e) { next(e); }
+});
+
+// 录入译文（body: {translation}）。译文为字符串；传 null/空串即清空（清空后未复核）。
+// 不推进 rev，不影响质检；此接口只写译文、不触碰原文，原文变化导致的待复核由文案 PATCH 处理。
+app.put('/api/branches/:id/segments/:sid/translation', (req, res, next) => {
+  try {
+    const branchId = parseInt(req.params.id, 10);
+    const segId = parseInt(req.params.sid, 10);
+    getBranchOr404(branchId);
+    if (!req.body || !Object.prototype.hasOwnProperty.call(req.body, 'translation')) {
+      throw httpError(400, '需要提供 translation（字符串；传空串或 null 清空译文）');
+    }
+    const raw = req.body.translation;
+    if (raw !== null && typeof raw !== 'string') throw httpError(400, 'translation 必须为字符串');
+    const translation = raw === null ? '' : raw.replace(/\s+$/g, '');
+    const seg = db.prepare(
+      'SELECT id, translation, translation_reviewed FROM branch_segments WHERE id = ? AND branch_id = ?'
+    ).get(segId, branchId);
+    if (!seg) throw httpError(404, '片段不存在');
+
+    const prev = seg.translation || '';
+    if (translation === prev) {
+      return res.json({ ok: true, changed: false, translation, translation_reviewed: !!seg.translation_reviewed });
+    }
+    // 译文内容变化：清空即未复核；填入/替换译文同样需要重新复核
+    db.prepare('UPDATE branch_segments SET translation = ?, translation_reviewed = 0 WHERE id = ?')
+      .run(translation === '' ? null : translation, segId);
+    res.json({ ok: true, changed: true, translation, translation_reviewed: false });
+  } catch (e) { next(e); }
+});
+
+// 标记译文复核状态（body: {reviewed: true|false}）。
+// 空译文不能复核（400）；取消复核传 false。不推进 rev，不影响质检。
+app.put('/api/branches/:id/segments/:sid/translation/review', (req, res, next) => {
+  try {
+    const branchId = parseInt(req.params.id, 10);
+    const segId = parseInt(req.params.sid, 10);
+    getBranchOr404(branchId);
+    if (!req.body || typeof req.body.reviewed !== 'boolean') {
+      throw httpError(400, '需要提供 reviewed（布尔值 true/false）');
+    }
+    const reviewed = req.body.reviewed;
+    const seg = db.prepare(
+      'SELECT id, translation, translation_reviewed FROM branch_segments WHERE id = ? AND branch_id = ?'
+    ).get(segId, branchId);
+    if (!seg) throw httpError(404, '片段不存在');
+    if (reviewed && !(typeof seg.translation === 'string' && seg.translation.trim() !== '')) {
+      throw httpError(400, '空译文不能复核，请先录入译文');
+    }
+    const flag = reviewed ? 1 : 0;
+    if (flag !== (seg.translation_reviewed ? 1 : 0)) {
+      db.prepare('UPDATE branch_segments SET translation_reviewed = ? WHERE id = ?').run(flag, segId);
+    }
+    res.json({ ok: true, translation: seg.translation || '', translation_reviewed: reviewed });
+  } catch (e) { next(e); }
+});
+
+// 译文复核与双语导出闸门概览（空译文/待复核/时间线问题清单）
+app.get('/api/branches/:id/translations', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const branch = getBranchOr404(id);
+    const segments = getBranchSegments(db, id);
+    res.json({
+      branch: { id: branch.id, name: branch.name, kind: branch.kind },
+      ...translations.translationSummary(segments)
+    });
+  } catch (e) { next(e); }
+});
+
+// 双语导出前检查（不生成文件）：空译文、待复核片段、时间线问题逐条列出
+app.get('/api/branches/:id/export-bilingual/validate', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    getBranchOr404(id);
+    const gate = translations.bilingualGate(getBranchSegments(db, id));
+    res.json({ ok: gate.can_export, ...gate });
+  } catch (e) { next(e); }
+});
+
+// 双语 SRT 导出：逐段输出原文和译文，沿用当前时码与连续编号；
+// 任何空译文、待复核片段或时间线错误都列出片段并拒绝整份导出
+app.get('/api/branches/:id/export-bilingual', (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const branch = getBranchOr404(id);
+    const segments = getBranchSegments(db, id);
+    const gate = translations.bilingualGate(segments);
+    if (!gate.can_export) {
+      throw httpError(
+        409,
+        `双语字幕导出被拒绝（空译文 ${gate.missing.length} 条，待复核 ${gate.pending.length} 条，时间线问题 ${gate.timeline_issues.length} 处），请逐条处理后再导出`,
+        { missing: gate.missing, pending: gate.pending, timeline_issues: gate.timeline_issues }
+      );
+    }
+    const script = db.prepare('SELECT name FROM scripts WHERE id = ?').get(branch.script_id);
+    const body = toBilingualSrt(segments);
+    const fname = `${script.name}-${branch.name}-双语.srt`;
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fname)}`);
+    res.type('application/x-subrip; charset=utf-8').send(body);
   } catch (e) { next(e); }
 });
 
@@ -749,6 +862,8 @@ app.use((err, req, res, next) => {
     ...(err.qc_errors ? { qc_errors: err.qc_errors } : {}),
     ...(err.timeline_issues ? { timeline_issues: err.timeline_issues } : {}),
     ...(err.unassigned ? { unassigned: err.unassigned } : {}),
+    ...(err.missing ? { missing: err.missing } : {}),
+    ...(err.pending ? { pending: err.pending } : {}),
     ...(err.unresolved_hits ? { unresolved_hits: err.unresolved_hits } : {}),
     ...(err.invalid_exemptions ? { invalid_exemptions: err.invalid_exemptions } : {}),
     ...(err.report_stale != null ? { report_stale: err.report_stale } : {}),

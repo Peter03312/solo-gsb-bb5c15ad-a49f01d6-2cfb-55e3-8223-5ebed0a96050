@@ -17,6 +17,7 @@
 function getBranchSegments(db, branchId) {
   return db.prepare(`
     SELECT bs.id, bs.ord, bs.start_ms, bs.end_ms, bs.text, bs.actor_id,
+           bs.translation, bs.translation_reviewed,
            ac.name AS actor_name,
            GROUP_CONCAT(ss.source_id) AS source_ids
     FROM branch_segments bs
@@ -33,6 +34,8 @@ function getBranchSegments(db, branchId) {
     text: row.text,
     actor_id: row.actor_id,
     actor_name: row.actor_name,
+    translation: row.translation ?? '',
+    translation_reviewed: !!row.translation_reviewed,
     source_ids: row.source_ids ? row.source_ids.split(',').map(Number) : []
   }));
 }
@@ -49,11 +52,15 @@ function segEqualOriginal(seg, src) {
 }
 
 /**
- * 单来源片段相对原稿「完全未动」：文案/时码相同且没有演员归属。
- * 仅指定演员（文案/时码未动）也算一侧改动，合并时由该侧继承归属。
+ * 单来源片段相对原稿「完全未动」：文案/时码相同、没有演员归属，且没有译文。
+ * 指定演员或录入/复核译文（文案/时码未动）也算一侧改动，合并时由该侧继承。
  */
 function segUnchangedSingle(seg, src) {
-  return !!src && seg.source_ids.length === 1 && seg.actor_id == null && segEqualOriginal(seg, src);
+  return !!src && seg.source_ids.length === 1 &&
+    seg.actor_id == null &&
+    !(seg.translation && seg.translation.trim() !== '') &&
+    !seg.translation_reviewed &&
+    segEqualOriginal(seg, src);
 }
 
 /**
@@ -67,6 +74,9 @@ function blocksEqual(ga, gb) {
     const b = gb.segments[i];
     if (a.start_ms !== b.start_ms || a.end_ms !== b.end_ms ||
         a.text !== b.text || a.actor_id !== b.actor_id) return false;
+    // 译文内容与复核状态都纳入比较：任一不同即按冲突逐处选侧
+    if ((a.translation || '') !== (b.translation || '') ||
+        !!a.translation_reviewed !== !!b.translation_reviewed) return false;
     const sa = a.source_ids.slice().sort((x, y) => x - y).join(',');
     const sb = b.source_ids.slice().sort((x, y) => x - y).join(',');
     if (sa !== sb) return false;
@@ -120,6 +130,8 @@ function segPayload(seg, srcBySeq) {
     text: seg.text,
     actor_id: seg.actor_id ?? null,
     actor_name: seg.actor_name ?? null,
+    translation: seg.translation || '',
+    translation_reviewed: !!seg.translation_reviewed,
     sources: seg.source_ids
       .map((id) => srcBySeq.idToSeq.get(id))
       .filter((s) => s != null)
@@ -273,6 +285,8 @@ function origPayload(src) {
     text: src.text,
     actor_id: null,
     actor_name: null,
+    translation: '',
+    translation_reviewed: false,
     sources: [src.seq]
   };
 }
@@ -305,7 +319,7 @@ function applyMerge(db, opts, resolutions) {
     const branchId = branchInfo.lastInsertRowid;
 
     const insSeg = db.prepare(
-      'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, actor_id) VALUES (?, ?, ?, ?, ?, ?)'
+      'INSERT INTO branch_segments (branch_id, ord, start_ms, end_ms, text, actor_id, translation, translation_reviewed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
     );
     const insLink = db.prepare(
       'INSERT INTO segment_sources (branch_segment_id, source_id) VALUES (?, ?)'
@@ -330,7 +344,10 @@ function applyMerge(db, opts, resolutions) {
           const ok = db.prepare('SELECT 1 FROM actors WHERE id = ? AND script_id = ?').get(actorId, opts.scriptId);
           if (!ok) actorId = null;
         }
-        const r = insSeg.run(branchId, ord++, g.start_ms, g.end_ms, g.text, actorId);
+        // 译文与复核状态随所选侧一并进入合并分支（所选内容与状态一并采用，不重置复核）
+        const translation = g.translation || '';
+        const reviewed = translation !== '' && !!g.translation_reviewed ? 1 : 0;
+        const r = insSeg.run(branchId, ord++, g.start_ms, g.end_ms, g.text, actorId, translation, reviewed);
         if (g.sources && g.sources.length) {
           for (const seq of g.sources) insLink.run(r.lastInsertRowid, seqToId.get(seq));
         } else {
